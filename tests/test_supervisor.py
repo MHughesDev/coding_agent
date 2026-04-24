@@ -4,8 +4,8 @@ import csv
 import json
 import tempfile
 import unittest
-from datetime import datetime
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from app.config import AppConfig
@@ -124,6 +124,116 @@ class SupervisorTests(unittest.TestCase):
                 state.activate(repo, "Q2", started_at=datetime.utcnow())
 
 
+    def test_stale_lock_is_recovered_and_queue_marked_failed(self) -> None:
+        from app.locks import lock_path, write_lock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._mk_repo(root, "a", [{"id": "A1", "summary": "one", "status": "open", "depends_on": ""}])
+            write_lock(repo, "A1", run_id="run-stale", pass_index=1)
+
+            payload = json.loads(lock_path(repo).read_text(encoding="utf-8"))
+            payload["pid"] = 999999
+            payload["start_time"] = "2000-01-01T00:00:00+00:00"
+            lock_path(repo).write_text(json.dumps(payload), encoding="utf-8")
+
+            runner = FakeRunner(calls=[])
+            supervisor = Supervisor(
+                repos=[repo],
+                config=AppConfig(sleep_seconds=1, lock_stale_seconds=60),
+                runner=runner,
+                state=SupervisorState(),
+                sleep_fn=lambda _s: None,
+            )
+
+            supervisor.run(one_pass=True)
+
+            self.assertEqual(runner.calls, [])
+            self.assertFalse(lock_path(repo).exists())
+            with (repo / "queue" / "queue.csv").open("r", encoding="utf-8", newline="") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertEqual(rows[0]["status"], "failed")
+            self.assertIn("Recovered stale lock", rows[0]["last_error"])
+
+    def test_active_lock_is_respected_and_repo_skipped(self) -> None:
+        from app.locks import lock_path, write_lock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._mk_repo(root, "a", [{"id": "A1", "summary": "one", "status": "open", "depends_on": ""}])
+            write_lock(repo, "A1", run_id="run-active", pass_index=1)
+
+            runner = FakeRunner(calls=[])
+            supervisor = Supervisor(
+                repos=[repo],
+                config=AppConfig(sleep_seconds=1, lock_stale_seconds=60),
+                runner=runner,
+                state=SupervisorState(),
+                sleep_fn=lambda _s: None,
+            )
+
+            supervisor.run(one_pass=True)
+
+            self.assertEqual(runner.calls, [])
+            self.assertTrue(lock_path(repo).exists())
+            with (repo / "queue" / "queue.csv").open("r", encoding="utf-8", newline="") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertEqual(rows[0]["status"], "open")
+
+    def test_queue_status_transitions_persist_for_successful_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._mk_repo(root, "a", [{"id": "A1", "summary": "one", "status": "open", "depends_on": ""}])
+            runner = FakeRunner(calls=[])
+            supervisor = Supervisor(
+                repos=[repo],
+                config=AppConfig(sleep_seconds=1),
+                runner=runner,
+                state=SupervisorState(),
+                sleep_fn=lambda _s: None,
+            )
+
+            supervisor.run(one_pass=True)
+
+            with (repo / "queue" / "queue.csv").open("r", encoding="utf-8", newline="") as fh:
+                rows = list(csv.DictReader(fh))
+
+            self.assertEqual(rows[0]["status"], "done")
+            self.assertEqual(rows[0]["attempt_count"], "1")
+            self.assertTrue(rows[0]["run_id"])
+            self.assertTrue(rows[0]["started_at"])
+            self.assertTrue(rows[0]["updated_at"])
+
+    def test_queue_status_transitions_persist_for_runner_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self._mk_repo(root, "a", [{"id": "A1", "summary": "one", "status": "open", "depends_on": ""}])
+
+            class FailingRunner(FakeRunner):
+                def run(self, request: HarnessRunRequest) -> HarnessRunResult:
+                    self.calls.append(request)
+                    raise RuntimeError("boom")
+
+            runner = FailingRunner(calls=[])
+            supervisor = Supervisor(
+                repos=[repo],
+                config=AppConfig(sleep_seconds=1),
+                runner=runner,
+                state=SupervisorState(),
+                sleep_fn=lambda _s: None,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                supervisor.run(one_pass=True)
+
+            with (repo / "queue" / "queue.csv").open("r", encoding="utf-8", newline="") as fh:
+                rows = list(csv.DictReader(fh))
+
+            self.assertEqual(rows[0]["status"], "failed")
+            self.assertEqual(rows[0]["last_error"], "boom")
+            self.assertEqual(rows[0]["attempt_count"], "1")
+
+
 class LockFilePayloadTests(unittest.TestCase):
     def test_payload_shape(self) -> None:
         from app.locks import clear_lock, lock_path, write_lock
@@ -138,9 +248,6 @@ class LockFilePayloadTests(unittest.TestCase):
             clear_lock(repo)
             self.assertFalse(lock_path(repo).exists())
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 class ImmediateRerunTests(unittest.TestCase):
     def test_non_empty_pass_reruns_without_sleep(self) -> None:
@@ -162,22 +269,29 @@ class ImmediateRerunTests(unittest.TestCase):
                 def run(self, request: HarnessRunRequest) -> HarnessRunResult:
                     nonlocal calls
                     calls += 1
-                    if calls >= 2:
-                        raise RuntimeError("stop-loop")
                     return super().run(request)
 
             sleeps: list[float] = []
+
+            def stop_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                raise RuntimeError("stop-loop")
+
             runner = StopRunner(calls=[])
             supervisor = Supervisor(
                 repos=[repo],
                 config=AppConfig(sleep_seconds=5),
                 runner=runner,
                 state=SupervisorState(),
-                sleep_fn=lambda s: sleeps.append(s),
+                sleep_fn=stop_sleep,
             )
 
             with self.assertRaisesRegex(RuntimeError, "stop-loop"):
                 supervisor.run(one_pass=False)
 
-            self.assertEqual(sleeps, [])
-            self.assertGreaterEqual(calls, 2)
+            self.assertEqual(calls, 1)
+            self.assertEqual(sleeps, [5])
+
+
+if __name__ == "__main__":
+    unittest.main()

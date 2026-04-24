@@ -27,6 +27,8 @@ class HarnessRunner:
         user_prompt = (
             f"Queue item: {request.queue_item}\n\n"
             f"Completion guidance:\n{completion_prompt}\n\n"
+            "Return STRICT JSON with shape: "
+            '{"steps":[{"intent":"...","acceptance":"...","targets":["path"]}]}.\n\n'
             f"Repo path: {request.repo_path}"
         )
 
@@ -37,15 +39,28 @@ class HarnessRunner:
 
         plan = build_plan(context, model_response)
         execution = execute_plan(context, plan)
-        validation = validate_execution(execution)
+        validation = validate_execution(context, execution)
 
         status = "success" if validation.passed else "failed"
         return HarnessRunResult(
             status=status,
             message=validation.details,
             metadata={
-                "plan_steps": plan.steps,
+                "plan_steps": [
+                    {
+                        "step_id": step.step_id,
+                        "intent": step.intent,
+                        "acceptance": step.acceptance,
+                        "targets": step.targets,
+                        "status": step.status,
+                    }
+                    for step in plan.steps
+                ],
+                "plan_malformed_output": plan.malformed_output,
                 "execution_notes": execution.notes,
+                "touched_files": execution.touched_files,
+                "validation_confidence": validation.confidence,
+                "validation_commands": validation.commands,
                 "model_response_excerpt": model_response[:300],
             },
         )

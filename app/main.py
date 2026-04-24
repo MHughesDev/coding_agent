@@ -12,7 +12,10 @@ from harness.runner import HarnessRunner
 def main() -> None:
     args = parse_args()
     configure_logging()
-    config = AppConfig.from_env(default_sleep_seconds=args.sleep_seconds)
+    config = AppConfig.from_env(
+        default_sleep_seconds=args.sleep_seconds,
+        default_lock_stale_seconds=args.lock_stale_seconds,
+    )
     model_client = OpenAICompatibleClient(
         base_url=config.model_base_url,
         api_key=config.model_api_key,
