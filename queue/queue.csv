@@ -1,0 +1,4 @@
+id,batch,phase,category,summary,agent_instructions,constraints,dependencies,related_files,notes,created_date
+TASK-001,1,1,refactor,Add docstrings to all Python files,"Review every .py file in the project. Add Google-style docstrings to all functions and classes that are missing them. Each docstring should describe what the function does, its parameters, and its return value.",Do not change any logic or behavior. Only add docstrings.,,src/main.py;src/utils.py,Start with main.py first,2026-04-25
+TASK-002,1,2,testing,Create unit tests for utils module,"Write pytest unit tests for every public function in src/utils.py. Cover normal cases, edge cases, and error cases. Place tests in tests/test_utils.py.",Use pytest only. Do not use unittest or mock unless absolutely necessary.,TASK-001,src/utils.py;tests/test_utils.py,Aim for 90% coverage,2026-04-25
+END,0,0,sentinel,NO_MORE_TASKS,STOP,,,,,2026-01-01
